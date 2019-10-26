@@ -471,6 +471,7 @@ int unpack(FILE *pkt_file, Packet *pkt)
     char *gateway;			/* ^AGATEWAY */
     Textlist theader;			/* RFC headers */
     Textlist tbody;    			/* RFC message body */
+    Textlist tbody_encoded;
     int uucp_flag;			/* To == UUCP or GATEWAY */
     int ret;
     char *split_line;
@@ -1631,6 +1632,7 @@ carbon:
 	
 	tl_for_each(&theader, encode_header, &en_state);
 	tl_for_each(&tbody, recode_body, &en_state);
+	mime_b64_encode_tl(&tbody, &tbody_encoded);
 	
 	/* Write header and message body to output file */
 	if(area)
@@ -1646,10 +1648,10 @@ carbon:
 	    if(!single_articles)
 	    {
 		fprintf(mail_file('n'), "#! rnews %ld\n",
-			tl_size(&theader) + tl_size(&tbody) );
+			tl_size(&theader) + tl_size(&tbody_encoded) );
 	    }
 	    tl_print(&theader, mail_file('n'));
-	    tl_print(&tbody,   mail_file('n'));
+	    tl_print(&tbody_encoded,   mail_file('n'));
 
 	    if(single_articles)
 		mail_close('n');
@@ -1664,13 +1666,14 @@ carbon:
 
 	    /* Mail message */
 	    tl_print(&theader, mail_file('m'));
-	    tl_print(&tbody,   mail_file('m'));
+	    tl_print(&tbody_encoded,   mail_file('m'));
 	    /* Close mail */
 	    mail_close('m');
 	}
 
 	tl_clear(&theader);
 	tl_clear(&tbody);
+	tl_clear(&tbody_encoded);
 	tl_clear(&tl);
 	msg_body_clear(&body);
 	tmps_freeall();

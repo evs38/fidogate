@@ -635,6 +635,43 @@ int mime_header_enc(char **dst, char *src, char *charset)
     return OK;
 }
 
+void mime_b64_encode_tl(Textlist *in, Textlist *out)
+{
+    TextlistIterator iter;
+    /* + \r\n\0 */
+    char buf[MIME_STRING_LIMIT + 3];
+    char ibuf[B64_ENC_CHUNK];
+    size_t len;
+    size_t pos;
+
+    tl_init(out);
+    tl_iterator_start(&iter, in);
+    pos = 0;
+
+    len = tl_iterator_next(&iter, ibuf, sizeof(ibuf));
+
+    while (len > 0) {
+	if (pos + B64_NLET_PER_CHUNK > MIME_STRING_LIMIT) {
+	    buf[pos++] = '\r';
+	    buf[pos++] = '\n';
+	    buf[pos++] = '\0';
+
+	    tl_append(out, buf);
+	    pos = 0;
+	}
+
+	mime_b64_encode_chunk(buf + pos, (unsigned char *)ibuf, len);
+	pos += B64_NLET_PER_CHUNK;
+	len = tl_iterator_next(&iter, ibuf, sizeof(ibuf));
+    }
+
+    buf[pos++] = '\r';
+    buf[pos++] = '\n';
+    buf[pos++] = '\0';
+
+    tl_append(out, buf);
+}
+
 int mime_b64_decode(char **dst, char *src, size_t len)
 {
     char *buf;
