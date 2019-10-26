@@ -740,8 +740,62 @@ int mime_b64_decode(char **dst, char *src, size_t len)
     return rc;
 }
 
+#define QP_NLET_MAX 3 /* =XX */
+
+/* out should point to a buffer enough to store 3 bytes */
+static size_t mime_qp_encode_octet(char *out, unsigned char *in)
+{
+    int len;
+    char buf[QP_NLET_MAX + 1]; /* max encoded length =XX\0 */
+
+    if (isascii(*in) && isprint(*in) && (*in != '=')) {
+	    *out = *in;
+	    return sizeof(*out);
+    }
+
+    len = snprintf(buf, sizeof(buf), "=%02X", *in);
+    memcpy(out, buf, len);
+    return len;
+}
+
 void mime_qp_encode_tl(Textlist *in, Textlist *out)
 {
+    TextlistIterator iter;
+    /* + =\r\n\0 */
+    char buf[MIME_STRING_LIMIT + 4];
+    char ibuf[1];
+    size_t len;
+    size_t pos;
+    size_t len_encoded;
+
+    tl_init(out);
+    tl_iterator_start(&iter, in);
+    pos = 0;
+
+    len = tl_iterator_next(&iter, ibuf, sizeof(ibuf));
+
+    while (len > 0) {
+	if (pos + QP_NLET_MAX > MIME_STRING_LIMIT) {
+	    buf[pos++] = '=';
+	    buf[pos++] = '\r';
+	    buf[pos++] = '\n';
+	    buf[pos++] = '\0';
+
+	    tl_append(out, buf);
+	    pos = 0;
+	}
+
+	len_encoded =
+	    mime_qp_encode_octet(buf + pos, (unsigned char *)ibuf);
+	pos += len_encoded;
+	len = tl_iterator_next(&iter, ibuf, sizeof(ibuf));
+    }
+
+    buf[pos++] = '\r';
+    buf[pos++] = '\n';
+    buf[pos++] = '\0';
+
+    tl_append(out, buf);
 }
 
 int mime_qp_decode(char **dst, char *src, size_t len)
