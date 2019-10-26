@@ -149,6 +149,42 @@ Ensure(hdr_dec_skips_long_charset_decoding)
 	assert_that(dres, is_equal_to_string(exp));
 }
 
+Ensure(mime_b64_encode_chunk_encodes_3)
+{
+	char *src = "Man";
+	char *exp = "TWFu";
+
+	dres[strlen(exp)] = '\0';
+
+	mime_b64_encode_chunk(dres, src, strlen(src));
+
+	assert_that(dres, is_equal_to_string(exp));
+}
+
+Ensure(mime_b64_encode_chunk_encodes_2)
+{
+	char *src = "Ma";
+	char *exp = "TWE=";
+
+	dres[strlen(exp)] = '\0';
+
+	mime_b64_encode_chunk(dres, src, strlen(src));
+
+	assert_that(dres, is_equal_to_string(exp));
+}
+
+Ensure(mime_b64_encode_chunk_encodes_1)
+{
+	char *src = "M";
+	char *exp = "TQ==";
+
+	dres[strlen(exp)] = '\0';
+
+	mime_b64_encode_chunk(dres, src, strlen(src));
+
+	assert_that(dres, is_equal_to_string(exp));
+}
+
 static TestSuite *create_mime_suite(void)
 {
     TestSuite *suite = create_named_test_suite(
@@ -163,6 +199,9 @@ static TestSuite *create_mime_suite(void)
     add_test(suite, hdr_dec_preserves_non_mime);
     add_test(suite, hdr_dec_cuts_long_non_mime);
     add_test(suite, hdr_dec_skips_long_charset_decoding);
+    add_test(suite, mime_b64_encode_chunk_encodes_1);
+    add_test(suite, mime_b64_encode_chunk_encodes_2);
+    add_test(suite, mime_b64_encode_chunk_encodes_3);
     return suite;
 }
 
