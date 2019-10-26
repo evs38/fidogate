@@ -740,6 +740,10 @@ int mime_b64_decode(char **dst, char *src, size_t len)
     return rc;
 }
 
+void mime_qp_encode_tl(Textlist *in, Textlist *out)
+{
+}
+
 int mime_qp_decode(char **dst, char *src, size_t len)
 {
     char *buf;
