@@ -382,35 +382,23 @@ static int encode_header(Textline *tl, void *arg)
 {
     struct encoding_state *state = arg;
     char *tmpbuf = NULL;
-    char *p;
-    size_t size;
-    size_t name_len;
     int rc;
+    size_t len;
 
     rc = recode_header(tl, state);
     if (rc != OK)
 	return rc;
 
-    if((charset_is_7bit(tl->line, strlen(tl->line)))
-       || (!(state->cvt8 & AREA_HB64)))
+    len = strlen(tl->line);
+    if (charset_is_7bit(tl->line, len) && len <= MIME_STRING_LIMIT)
 	return OK;
     
-    p = strstr(tl->line, ": ");
-    if (p == NULL)
-	return OK;
+    rc = mime_header_enc(&tmpbuf, tl->line, state->cs_out);
+    if (rc != OK)
+	    return OK; /* skip misformatted */
 
-    /* including `: `, like `Subject: ` */
-    name_len = p - tl->line + 2;
-
-    size = strlen(tl->line + name_len);
-    mime_header_enc(&tmpbuf, (unsigned char *)tl->line + name_len,
-		    size, state->cs_out);
-
-    size = name_len + strlen(tmpbuf) + 2; /* \n\0 */
-    tl->line = xrealloc(tl->line, size);
-    strcpy(tl->line + name_len, tmpbuf);
-    strcat(tl->line, "\n");
-    xfree(tmpbuf);
+    xfree(tl->line);
+    tl->line = tmpbuf;
     
     return OK;
 }

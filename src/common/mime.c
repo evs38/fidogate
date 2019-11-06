@@ -140,8 +140,11 @@ char *mime_dequote(char *d, size_t n, char *s, int flags)
 #define MIME_HEADER_CODE_MIDDLE_QP	"?Q?"
 #define MIME_HEADER_CODE_MIDDLE_B64	"?B?"
 #define MIME_HEADER_CODE_END	"?="
-#define MIME_HEADER_STR_DELIM	"\n "
-#define MIME_STRING_LIMIT 74
+/*
+ * no \r, see
+ * https://github.com/ykaliuta/fidogate/commit/a727f4bae629905392e8e174c003bfa38bcbf386
+ */
+#define MIME_HEADER_STR_DELIM	"\n"
 #define MIME_ENC_STRING_LIMIT 80
 #define MIME_MAX_ENC_LEN 31
 
@@ -194,12 +197,12 @@ int mime_qptoint(char c)
  * dst will not be NUL-terminated
  * Max 3 source octets encoded
  */
-void mime_b64_encode_chunk(char *dst, unsigned char *src, unsigned len)
+size_t mime_b64_encode_chunk(char *dst, unsigned char *src, unsigned len)
 {
     int padding;
 
     if (len == 0)
-	return;
+	return 0;
 
     if (len > B64_ENC_CHUNK)
 	len = B64_ENC_CHUNK;
@@ -224,95 +227,413 @@ void mime_b64_encode_chunk(char *dst, unsigned char *src, unsigned len)
 out:
     for (; padding > 0; padding--)
         dst[B64_NLET_PER_CHUNK - padding] = '=';
+
+    return len;
 }
 
-int mime_header_enc(char **dst, unsigned char *src, size_t len, char *encoding)
+struct mime_word_enc_state {
+    char *encoded_line;
+    char *charset;
+    size_t charset_len;
+    size_t size;
+    size_t inc;
+    size_t pos; /* position in the string */
+    size_t vpos; /* visual position in the line */
+    size_t limit; /* in 7 bit chars, no line endings */
+    size_t rem_len;
+    char rem[B64_ENC_CHUNK];
+    bool is_mime; /* previous word is not plain */
+};
+
+static void mime_header_enc_start(struct mime_word_enc_state *state,
+				  char *charset)
 {
-    int buflen, delimlen = 0;
-    char *buf = NULL;
-    int padding;
-    int i;
-    int outpos = 0;
-    char *delim = NULL;
+    size_t size = MIME_STRING_LIMIT + sizeof(MIME_HEADER_STR_DELIM);/* \0 counted */
+    char *p;
 
-    debug(6, "MIME: %s: %zd chars to encode (%s): %s",
-	  __FUNCTION__, len, encoding, src);
-    
-    padding = B64_ENC_CHUNK - len % B64_ENC_CHUNK;
-    
-    buflen = ((len + padding) / B64_ENC_CHUNK )  * B64_NLET_PER_CHUNK;
-    
-    if(encoding == NULL)
-    {
-        delimlen = strlen(MIME_HEADER_STR_DELIM);
+    p = xmalloc(size);
+    *p = '\0';
+    state->size = size;
+    state->encoded_line = p;
+    state->charset = charset;
+    state->charset_len = strlen(charset);
+    state->inc = size - 1; /* only one \0 */
+    state->pos = 0;
+    state->vpos = 0;
+    state->limit = MIME_STRING_LIMIT;
+    state->rem_len = 0;
+    state->is_mime = false;
+}
+
+static size_t mime_enc_calc_len(char *t, size_t len)
+{
+    size_t res;
+
+    /* only b64 now */
+
+    res = len / 3 * 4;
+    res += len % 3 ? 4 : 0;
+
+    return res;
+}
+
+static inline void mime_strcat(struct mime_word_enc_state *state, char *str)
+{
+    size_t len;
+
+    strcpy(state->encoded_line + state->pos, str);
+    len = strlen(str);
+    state->pos += len;
+    state->vpos += len;
+}
+
+static inline void mime_strlcpy(struct mime_word_enc_state *state,
+				char *str, size_t len)
+{
+    strncpy(state->encoded_line + state->pos, str, len);
+
+    state->pos += len;
+    state->vpos += len;
+
+    *(state->encoded_line + state->pos) = '\0';
+}
+
+/*
+ * Calculates length of the word if it have been encoded.
+ * Takes into account the previous state:
+ * - if previous state mime-encoded and adding 7 bit, that must be
+ *   closed;
+ * - if previous state mime-encoded and adding mime, that is just
+ *   connected to the code, space encoded, no mime-start;
+ * - if previous state is 7 bit and adding 7 bit -- just connect as
+ *   well;
+ * - if previous state is 7 bit and adding mime, it should start with
+ *   new mime-start;
+ * If current last word is mime, account 2 chars for mime-end before
+ * the new line.
+ */
+static size_t mime_word_calc_len(char *token, size_t len,
+				 bool prev_mime, bool is_7bit,
+				 size_t charset_len,
+				 char **start, /* first non-space */
+				 size_t *plen)
+{
+    size_t encoded_len;
+    char *p;
+    size_t postfix_len; /* len of ?= if needed */
+
+    for (p = token; p - token < len; p++) {
+	if (!isspace(*p))
+	    break;
     }
+
+    if (prev_mime) {
+	if (is_7bit) {
+	    encoded_len = strlen(MIME_HEADER_CODE_END) + len;
+	    postfix_len = 0;
+	} else {
+	    encoded_len = mime_enc_calc_len(token, len); /* with spaces */
+	    postfix_len = 2;
+	}
+    } else {
+	if (is_7bit) {
+	    encoded_len = len;
+	    postfix_len = 0;
+	} else {
+	    encoded_len = 1 + /* space */
+		strlen(MIME_HEADER_CODE_START) +
+		charset_len +
+		strlen(MIME_HEADER_CODE_MIDDLE_B64) +
+		mime_enc_calc_len(p, len); /* without spaces */
+	    postfix_len = 2;
+	}
+    }
+
+    *start = p;
+    *plen = postfix_len;
+    return encoded_len;
+}
+
+static void mime_flush_reminder(struct mime_word_enc_state *state)
+{
+    if (state->rem_len == 0)
+	return;
+
+    mime_b64_encode_chunk(state->encoded_line + state->pos,
+			  (unsigned char *)state->rem,
+			  state->rem_len);
+
+    state->pos += B64_NLET_PER_CHUNK;
+    state->vpos += B64_NLET_PER_CHUNK;
+    state->rem_len = 0;
+}
+
+static size_t mime_add_reminder(struct mime_word_enc_state *state,
+				char **p, size_t *len, size_t limit)
+{
+    size_t ret;
+    size_t rem_left;
+
+    if (state->rem_len == 0)
+	return 0;
+
+    if (state->rem_len + *len < B64_ENC_CHUNK) {
+	memcpy(&state->rem[state->rem_len], *p, *len);
+
+	state->rem_len += *len;
+	(*p) += *len;
+
+	ret = *len;
+	*len = 0;
+	return ret;
+    }
+
+    if (state->vpos + B64_NLET_PER_CHUNK > limit)
+	return 0;
+
+    rem_left = sizeof(state->rem) - state->rem_len;
+
+    memcpy(&state->rem[state->rem_len], *p, rem_left);
+    (*p) += rem_left;
+    *len -= rem_left;
+    state->rem_len += rem_left;
+
+    mime_flush_reminder(state);
+
+    return rem_left;
+}
+
+static inline size_t mime_save_reminder(struct mime_word_enc_state *state,
+					char *p, size_t len)
+{
+    if (len > sizeof(state->rem)) {
+	fprintf(stderr, "ERROR: too big reminder: %zu\n", len);
+	abort();
+    }
+
+    memcpy(state->rem, p, len);
+    state->rem_len = len;
+
+    return len;
+}
+
+static inline void mime_word_end(struct mime_word_enc_state *state)
+{
+    if (!state->is_mime)
+	return;
+
+    mime_flush_reminder(state);
+    mime_strcat(state, MIME_HEADER_CODE_END);
+
+    state->is_mime = false;
+}
+
+static inline void mime_line_break(struct mime_word_enc_state *state)
+{
+    state->size += state->inc;
+    state->encoded_line = xrealloc(state->encoded_line, state->size);
+
+    mime_word_end(state);
+
+    mime_strcat(state, MIME_HEADER_STR_DELIM);
+
+    state->vpos = 0;
+    state->is_mime = false;
+}
+
+static inline void mime_word_start(struct mime_word_enc_state *state)
+{
+    size_t len;
+
+    len = 1 + strlen(MIME_HEADER_CODE_START)
+	+ state->charset_len
+	+ strlen(MIME_HEADER_CODE_MIDDLE_B64)
+	+ B64_NLET_PER_CHUNK /* at least one */
+	+ strlen(MIME_HEADER_CODE_END);
+
+    if (state->vpos + len > state->limit)
+	mime_line_break(state);
+
+    mime_strcat(state, " ");
+    mime_strcat(state, MIME_HEADER_CODE_START);
+    mime_strcat(state, state->charset);
+    mime_strcat(state, MIME_HEADER_CODE_MIDDLE_B64);
+
+    state->is_mime = true;
+}
+
+/*
+ * Encodes part of word, that fits the current line
+ */
+static size_t mime_word_enc_b64(struct mime_word_enc_state *state,
+				char *p, size_t len)
+{
+    size_t limit;
+    size_t left;
+    size_t done;
+    size_t chunk;
+
+    limit = state->limit - strlen(MIME_HEADER_CODE_END);
+
+    done = mime_add_reminder(state, &p, &len, limit);
+
+    left = len;
+
+    while (left >= B64_ENC_CHUNK) {
+	if (state->vpos + B64_NLET_PER_CHUNK > limit)
+	    break;
+
+	chunk = mime_b64_encode_chunk(state->encoded_line + state->pos,
+				      (unsigned char *)p, left);
+
+	left -= chunk;
+	done += chunk;
+	p += chunk;
+	state->pos += B64_NLET_PER_CHUNK;
+	state->vpos += B64_NLET_PER_CHUNK;
+    }
+
+    *(state->encoded_line + state->pos) = '\0';
+
+    if (left < B64_ENC_CHUNK)
+	done += mime_save_reminder(state, p, left);
+
+    return done;
+}
+
+/*
+ * Encodes word if necessary (non-7bit) and adds to the header line.
+ * Makes extented line if needed.
+ * Takes token with the leading spaces when exist
+ */
+static void mime_word_enc(struct mime_word_enc_state *state,
+			  char *token, size_t len)
+{
+    size_t encoded_len;
+    char *p;
+    size_t postfix_len; /* len of ?= if needed */
+    size_t left;
+    bool is_7bit;
+    size_t consumed;
+
+    is_7bit = charset_is_7bit(token, len);
+    encoded_len = mime_word_calc_len(token, len,
+				     state->is_mime, is_7bit,
+				     state->charset_len,
+				     &p, &postfix_len);
+
+    encoded_len += state->rem_len ? B64_NLET_PER_CHUNK : 0;
+
+    /* simple case, no encoding */
+    /* postfix_len must be 0 for is_7bit, but for completness */
+    if (is_7bit && (state->vpos + encoded_len + postfix_len <= state->limit)) {
+
+	mime_word_end(state);
+
+	mime_strlcpy(state, token, len);
+
+	return;
+    }
+
+    /* encode if non-7bit or very long */
+
+    left = len;
+    if (!state->is_mime)
+	left -= (p - token); /* skip spaces */
     else
-    {
-        delimlen = strlen(MIME_HEADER_CODE_START)
-            + xstrnlen(encoding, MIME_MAX_ENC_LEN)
-            + strlen(MIME_HEADER_CODE_MIDDLE_B64)
-            + strlen(MIME_HEADER_CODE_END);
-        buflen += delimlen;
-        delimlen += strlen(MIME_HEADER_STR_DELIM);
+	p = token; /* encode with the spaces */
+
+    for (;;) {
+	if (!state->is_mime) {
+	    mime_word_start(state);
+	}
+
+	consumed = mime_word_enc_b64(state, p, left);
+
+	p += consumed;
+	left -= consumed;
+	if (left == 0)
+	    break;
+
+	mime_line_break(state);
+    }
+}
+
+static char *mime_header_enc_end(struct mime_word_enc_state *state)
+{
+    size_t len;
+
+    if (state->is_mime) {
+	len = strlen(MIME_HEADER_CODE_END);
+	if (state->rem_len)
+	    len += B64_NLET_PER_CHUNK;
+
+	if (state->vpos + len > state->limit)
+	    mime_line_break(state);
+
+	mime_flush_reminder(state);
+	mime_strcat(state, MIME_HEADER_CODE_END);
     }
 
-    if((delim = xmalloc(delimlen + 1)) == NULL)
-        return ERROR;
+    if (state->encoded_line[state->pos - 1] != '\n')
+	strcat(state->encoded_line, MIME_HEADER_STR_DELIM);
 
-    buflen += (buflen / (MIME_STRING_LIMIT - delimlen)) * delimlen;
-    buflen += 1; /* \0 */
+    return state->encoded_line;
+}
+/*
+ * Mime encodes 8bit header, splitting lines when necessary.
+ * src must be NUL-terminated
+ *
+ * Result is \n terminated
+ *
+ * Encoding is done word by word, 7bit words are not encoded
+ */
+int mime_header_enc(char **dst, char *src, char *charset)
+{
+    struct mime_word_enc_state state;
+    char *token;
+    char *token_end;
 
-    if((buf = xmalloc(buflen)) == NULL)
-    {
-        xfree(delim);
-        return ERROR;
+    debug(6, "MIME: %s: to encode (%s): %s", __func__, charset, src);
+
+    mime_header_enc_start(&state, charset);
+
+    /* strtok does not work on RO strings */
+
+    token = src;
+    token_end = strchr(src, ' ');
+    if (token_end == NULL) {
+	fglog("ERROR: misformatted header: %s\n", src);
+	return ERROR;
     }
 
-    memset(buf, 0, buflen);
-    delim[0] = '\0';
+    while (token != NULL) {
+	mime_word_enc(&state, token, token_end - token);
 
-    *dst = buf;
-    
-    if(encoding == NULL)
-    {
-        strcpy(delim, MIME_HEADER_STR_DELIM);
-    }
-    else
-    {
-        strcat(buf, MIME_HEADER_CODE_START);
-        strncat(buf, encoding, MIME_MAX_ENC_LEN);
-        strcat(buf, MIME_HEADER_CODE_MIDDLE_B64);
-        outpos += strlen(buf);
+	token = token_end;
 
-        strcat(delim, MIME_HEADER_CODE_END);
-        strcat(delim, MIME_HEADER_STR_DELIM);
-        strcat(delim, buf);
-    }
+	/* first skip spaces */
+	while ((*token_end == ' ' || *token_end == '\t')
+	       && *token_end != '\0')
+	    token_end++;
 
-    for(i = 0; i < len; i += 3)
-    {
-	size_t chunk;
+	if (*token_end == '\0') {
+	    token = NULL;
+	    continue;
+	}
 
-        if((outpos % MIME_STRING_LIMIT) < 4 )
-        {
-            strcat(buf+outpos, delim);
-            outpos += delimlen;
-        }
-
-	chunk = MIN(B64_ENC_CHUNK, len - i);
-	mime_b64_encode_chunk(buf + outpos, src + i, chunk);
-	outpos += B64_NLET_PER_CHUNK;
+	/* then find next space or EOL */
+	while (*token_end != ' ' && *token_end != '\t' && *token_end != '\0')
+	    token_end++;
     }
 
-    if(encoding != NULL)
-        strcat(buf, MIME_HEADER_CODE_END);
+    mime_header_enc_end(&state);
+    *dst = state.encoded_line;
 
-    debug(6, "MIME: %s: encoded: %s", __FUNCTION__, buf);
+    debug(6, "MIME: %s: encoded: %s", __func__, *dst);
 
-    xfree(delim);
     return OK;
 }
-
 
 int mime_b64_decode(char **dst, char *src, size_t len)
 {
