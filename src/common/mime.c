@@ -638,8 +638,8 @@ int mime_header_enc(char **dst, char *src, char *charset)
 void mime_b64_encode_tl(Textlist *in, Textlist *out)
 {
     TextlistIterator iter;
-    /* + \r\n\0 */
-    char buf[MIME_STRING_LIMIT + 3];
+    /* + \n\0, no \r needed */
+    char buf[MIME_STRING_LIMIT + 2];
     char ibuf[B64_ENC_CHUNK];
     size_t len;
     size_t pos;
@@ -652,7 +652,6 @@ void mime_b64_encode_tl(Textlist *in, Textlist *out)
 
     while (len > 0) {
 	if (pos + B64_NLET_PER_CHUNK > MIME_STRING_LIMIT) {
-	    buf[pos++] = '\r';
 	    buf[pos++] = '\n';
 	    buf[pos++] = '\0';
 
@@ -665,7 +664,6 @@ void mime_b64_encode_tl(Textlist *in, Textlist *out)
 	len = tl_iterator_next(&iter, ibuf, sizeof(ibuf));
     }
 
-    buf[pos++] = '\r';
     buf[pos++] = '\n';
     buf[pos++] = '\0';
 
@@ -761,7 +759,7 @@ static size_t mime_qp_encode_octet(char *out, unsigned char *in)
 void mime_qp_encode_tl(Textlist *in, Textlist *out)
 {
     TextlistIterator iter;
-    /* + =\r\n\0 */
+    /* + =\n\0 */
     char buf[MIME_STRING_LIMIT + 4];
     char ibuf[1];
     size_t len;
@@ -777,7 +775,6 @@ void mime_qp_encode_tl(Textlist *in, Textlist *out)
     while (len > 0) {
 	if (pos + QP_NLET_MAX > MIME_STRING_LIMIT) {
 	    buf[pos++] = '=';
-	    buf[pos++] = '\r';
 	    buf[pos++] = '\n';
 	    buf[pos++] = '\0';
 
@@ -791,7 +788,6 @@ void mime_qp_encode_tl(Textlist *in, Textlist *out)
 	len = tl_iterator_next(&iter, ibuf, sizeof(ibuf));
     }
 
-    buf[pos++] = '\r';
     buf[pos++] = '\n';
     buf[pos++] = '\0';
 
