@@ -8,9 +8,9 @@ configs  =  mailer/postfix/master.cf \
 	    mailer/sendmail/mailer/ftn.m4 \
 	    news/leafnode/config.h \
 	    news/leafnode/Makefile \
-	    examples/dyff/fidogate.conf.sample \
+	    examples/node/fidogate.conf.sample \
 	    examples/point/fidogate.conf \
-	    examples/dyff/packing.sample
+	    examples/node/packing.sample
 
 $(configs):
 	$(SUBSTCMD) $@.in > $@
