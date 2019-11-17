@@ -698,9 +698,6 @@ RFCAddrMode <>
 DontIgnoreSoftCR
 
 
-# Do'nt change content type charset
-DontChangeContentTypeCharset
-
 # Charset mapping
 #
 # Format	default:ftn:rfc
