@@ -1132,7 +1132,7 @@ static int mime_handle_word(char *s, char **out, size_t *out_len,
 }
 
 /* source @s must be '\0'-terminated */
-char *mime_header_dec(char *d, size_t d_max, char *s)
+char *mime_header_dec(char *d, size_t d_max, char *s, char *to)
 {
     char *save_d = d;
     bool is_mime = false;
@@ -1174,7 +1174,7 @@ char *mime_header_dec(char *d, size_t d_max, char *s)
 	debug(6, "subject charset: %s", charset);
 	d_size = d_left;
 	rc = charset_recode_string(d, &d_size, buf, &len,
-				   charset, INTERNAL_CHARSET);
+				   charset, to);
 	free(buf);
 
 	/* unused space was returned in d_size */
